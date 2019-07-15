@@ -3,10 +3,13 @@
 import pandas as pd
 import numpy as np
 import requests
+import os
 
 api = "https://api.insee.cn/tcm/prod/influxdb/query"  ## 生产环境的API
 
 def Transfordata(res):
+    if "series" not in res["results"][0]:
+        return []
     columns = res["results"][0]['series'][0]['columns']
     data = res["results"][0]['series'][0]['values']
     df = pd.DataFrame(data,columns = columns)
@@ -29,18 +32,43 @@ def CalApi(node_id,start,end):
     return r.json()
 
 
-def GetNode_data(node_id = '',start = None,end = None,periods = None,freq=None):
-    times = pd.date_range(start= start,end = end,periods = periods,freq=None)
-    start = times.min()
-    end = times.max()
-    res  =CalApi(node_id,start,end) ## 中碳api接口调用
-    df = Transfordata(res)  ## 接口response 转换 dataframe
-    df = Decompression(df,end) ## 反解压 还原秒级数据
-    
-    ### 利用 quality 和 state 对数据进行过滤
-    if freq:  ### 利用 freq 对数据进行 降采样
-        df = df.resample(freq).mean().fillna(method = "ffill")
-    return df
+def GetNode_data(node_id = '',columns = ['quality', 'state', 'value'],factory = '',month = '',\
+                 start = None,end = None,periods = None,freq=None,save = False):  
+    ## 单变量 一次请求获取时间范围最大 为 3天, 多余三天的分段获取
+    ## columns : 'quality', 'state', 'value'
+    format = "%Y-%m-%d %H:%M:%S"
+    times = pd.date_range(start= start,end = end,periods = periods,freq="3D")
+    _start = times.min().strftime(format)
+    _end = times.max().strftime(format)
+    end1 = end if end else _end
+    times = times.strftime(format).tolist()+[end1]
+    times = list(set(times))
+    times.sort()
+    datas = []
+    for index in range(len(times)-1):      
+        res  =CalApi(node_id,times[index],times[index+1]) ## 中碳api接口调用
+        temp = Transfordata(res)  ## 接口response 转换 dataframe
+        if len(temp):
+            datas.append(temp)
+    if len(datas):
+        df = pd.concat(datas)
+        df = Decompression(df,end) ## 反解压 还原秒级数据
+        ### 利用 quality 和 state 对数据进行过滤
+        if freq:  ### 利用 freq 对数据进行 降采样
+            df = df.resample(freq)[columns].mean().fillna(method = "ffill")
+        
+        if save:
+            rawdir= '/'.join(['/home/khpython/Root/data/raw',factory,month])
+            if df['value'].std()==0:
+                print ("%s 值未发生变化 值为 %0.2f"%(node_id,df['value'].mean()))
+            else:
+                print (df.shape)
+                if not os.path.exists(rawdir):
+                    os.makedirs(rawdir)
+                df.to_pickle(os.path.join(rawdir,"%s.pk"%node_id))
+        return df
+    else:
+        return pd.DataFrame()
 
 def GetNodes_data(node_ids = [],start = None,end = None,periods = None,freq=None):
     '''为了防止 接口频繁调用给生产数据库带来压力，调用GetNodes_data 时，一次调用时，node_ids个数控制在50以内
@@ -67,6 +95,25 @@ def GetNodes_data(node_ids = [],start = None,end = None,periods = None,freq=None
     if freq:  ### 利用 freq 对数据进行 降采样
         data = data.resample(freq).mean().fillna(method = "ffill")
     return data
+
+def GenerateAvgTemp(nodes_id = ["TE_1003a", "TE_1003b", "TE_1003c"],column = "value",factory='中碳能源',\
+                    month="2019_06",filename = None):
+    dfs= []
+    for node_id in nodes_id:
+        rawdir= '/'.join(['/home/khpython/Root/data/raw',factory,month])
+        path = os.path.join(rawdir,"%s.pk"%node_id)
+        dfs.append(pd.read_pickle(path)[column])
+    df = pd.concat(dfs,axis=1)
+    df.columns = nodes_id
+    df = df.fillna(method ="ffill")
+    t = df.max(axis=1)
+    df = df.apply(lambda x:x-t,axis=0)
+    res = (df.sum(axis=1)+t*(len(df.columns)-1)/(len(df.columns)-1)).to_frame()
+    res.columns = [column]
+    if filename:
+        path = os.path.join(rawdir,"%s.pk"%filename)
+        res.to_pickle(path)
+    return res
 
 if __name__  == "__main__":
     ## 函数调用方式
