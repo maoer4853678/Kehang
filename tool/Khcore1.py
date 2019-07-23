@@ -4,11 +4,11 @@
 import pandas as pd
 import numpy as np
 import requests
-import os
+import os,sys
 from sklearn.linear_model import LinearRegression
 
-basepath = 'D:/0.K2Data/4.AOI_Process/Kehang/data/raw'
-# basepath = '/home/khpython/Root/data/raw'
+basepath = os.path.join(os.path.split(os.path.split( __file__)[0])[0],"data")
+# basepath = '/home/khpython/Root/data'
 #api = "https://api.insee.cn/tcm/prod/influxdb/query"  ## 生产环境的API
 api = 'http://49.4.86.40:30009/tcm/prod/temp/influxdb/query'
 
@@ -39,7 +39,6 @@ def CalApi(node_id,start,end):
 
 def GetNode_data(node_id = '',columns = ['quality', 'state', 'value'],factory = '',month = '',\
                  start = None,end = None,periods = None,freq=None,save = False):  
-    ## 单变量 一次请求获取时间范围最大 为 3天, 多余三天的分段获取
     ## columns : 'quality', 'state', 'value'
     format = "%Y-%m-%d %H:%M:%S"
     ## influxdb 存在一起sql 最大返回条目限制 10000条, 所以需要分段获取 2.5H频次获取数据
@@ -65,7 +64,7 @@ def GetNode_data(node_id = '',columns = ['quality', 'state', 'value'],factory = 
             df = df.resample(freq)[columns].mean().fillna(method = "ffill")
         
         if save:
-            rawdir= '/'.join([basepath,factory,month])
+            rawdir= '/'.join([basepath,'raw',factory,month])
             if df['value'].std()==0:
                 print ("%s 值未发生变化 值为 %0.2f"%(node_id,df['value'].mean()))
             else:
@@ -102,8 +101,7 @@ def GetNodes_data(node_ids = [],start = None,end = None,periods = None,freq=None
     return data
 
 def ReadRawData(node_id = '',factory = "中碳能源",month = "2019_06",column = ['value']):
-
-    rawdir= '/'.join([basepath,factory,month])
+    rawdir= '/'.join([basepath,'raw',factory,month])
     path = os.path.join(rawdir,"%s.pk"%node_id)
     df = pd.read_pickle(path)
     if not len(column):
@@ -125,7 +123,7 @@ def GenerateAvgTemp(nodes_id = ["TE_1003a", "TE_1003b", "TE_1003c"],column = "va
     res = (df.sum(axis=1)+t*(len(df.columns)-1)/(len(df.columns)-1)).to_frame()
     res.columns = [column]
     if filename:
-        rawdir= '/'.join([basepath,factory,month])
+        rawdir= '/'.join([basepath,'raw',factory,month])
         path = os.path.join(rawdir,"%s.pk"%filename)
         res.to_pickle(path)
     return res
@@ -162,12 +160,12 @@ def SingleVarStat(node_id='',data = [],factory = "中碳能源",month = "2019_06
     '''
     variale: str, 需要分析的变量名
     window: str，设置时间窗口大小，默认为30分钟
-    step:str，设置步长，默认为5分钟
+    step: str，设置步长，默认为5分钟
     start: str，设置起始时间，默认为None，取该变量本月第一个时间戳
     end：str，设置结束时间，默认为None，取该变量本月的最后一个时间戳
     save:bool，是否需要将数据存下来，默认为False
     '''
-    rawdir= '/'.join([basepath,factory,month])
+    rawdir= '/'.join([basepath,'raw',factory,month])
     savedir = rawdir.replace('/raw/','/process/')
     if len(data):
         df = data
@@ -198,7 +196,7 @@ def SingleVarStat(node_id='',data = [],factory = "中碳能源",month = "2019_06
     if save:
         if not os.path.exists(savedir):
             os.makedirs(savedir)
-        dfnew.to_pickle(os.path.join(savedir,"%s_%s_features.pk"%(node_id,window)))
+        dfnew.to_pickle(os.path.join(savedir,"%s_%s_%s_features.pk"%(node_id,window,step)))
    
     return dfnew
 
@@ -235,7 +233,7 @@ def GetSingleFeatures(node_id='',factory = "中碳能源",month = "2019_06" ,win
     start : 获取数据的起始时间
     end : 获取数据的截止时间
     '''
-    dirname= '/'.join([basepath.replace('raw','process'),factory,month])
+    dirname= '/'.join([basepath,'process',factory,month])
     path = os.path.join(dirname,"%s_%s_features.pk"%(node_id,window))
     df = pd.read_pickle(path)
     if start and end:  
@@ -273,12 +271,102 @@ def GetGroupFeatures(nodes_id = [],factory = "中碳能源",month = "2019_06" ,w
 
 
 def ReadSingleVarStat(node_id = '',factory = "中碳能源",month = "2019_06",window = "30min",column = []):
-    rawdir= '/'.join([basepath.replace('raw','process'),factory,month])
-    path = os.path.join(rawdir,"%s_%s_features.pk"%(node_id,window))
+    rawdir= '/'.join([basepath,'process',factory,month])
+    path = os.path.join(rawdir,"%s_%s_%s_features.pk"%(node_id,window,step))
     df = pd.read_pickle(path)
     if not len(column):
         column = df.columns
     return df[column]
+
+
+def SensorCal(df, sensor = "ATTLT_3",window1 = 3,window2 = 10,overwrite=True, name = None):
+    '''
+    出口SO2 传感器校核函数
+    df : 待校准的数据源,应包含 出口SO2 和 出口O2
+    sensor : 校准参照测点, 一般参照 出口O2
+    window1 : 过程滑动窗口长度 单位为 min , 默认为 3min
+    window2 : 合并窗口长度 单位为 min, 即若判别两个区间距离小于 window2, 则合并为一个窗口
+    overwrite : 是否覆盖原测点变量, 默认覆盖
+    name :  存储查看修正后 效果html, 默认不存储
+    '''
+    ## 传感器失效区间 判别
+    data = df.sort_index()
+    temp = data[sensor].diff()
+    temp1 = temp.abs().rolling("%dmin"%window1).max()
+    temp2 = temp1[temp1>0.3].to_frame()
+    temp2['diff']= ((pd.Series(temp2.index).diff().dt.total_seconds()).values/60)
+    temp2['diff']= temp2['diff'].fillna(100)
+    ## 生成传感器失效区间 
+    res = pd.DataFrame()
+    res['start']= temp2[temp2['diff']>1.1].index
+    temp3 = temp2.index.get_indexer(temp2[temp2['diff']>1.1].iloc[1:].index)-1
+    res['end']=temp2.iloc[temp3].index.tolist()+[temp2.index[-1]]
+    res['start'] = res['start']- pd.to_timedelta(1,unit ='m')
+    res['end'] = res['end']- pd.to_timedelta(1,unit ='m')
+    res["temp"] = [np.nan]+((res.start.iloc[1:]-res.end.iloc[:-1].values).dt.total_seconds()/60.0).tolist()
+    res["temp"] = res["temp"].fillna(100)
+    bins = res[res['temp']>window2].index
+    res['temp1'] = pd.cut(res.index,bins,right=False)
+    res = res.groupby("temp1").agg({"start":"min","end":"max"})
+    res['time'] = (res['end']-res['start']).dt.total_seconds()/60.0
+    res.index = range(len(res))
+    
+    ## 根据传感器失效区间 对O2 和 SO2 插值
+    if not overwrite:
+        raw = data.copy()
+    for i in res.index:
+        t = data[(data.index>=res.loc[i,'start'])&(data.index<=res.loc[i,'end'])]
+        data.loc[t.index,:] = np.nan
+    data = data.resample("1min").interpolate()
+    if not overwrite:
+        data.columns = data.columns+"_bd"
+        for col in raw.columns:
+            data[col] = raw[col]
+    if name:
+        me.Plot_LineBar(data, name = name, overwrite=True)
+        print ("save image as %s"%name)
+    return data
+
+
+def AutoLabel(df,column='',th =95 ,window1 = 3, window2 = 14, left_offset = 0, right_offset = 0, name = None):
+    '''
+    测点自动打标签函数
+    df : 待打标签的数据集
+    column :  标签参考变量名称
+    th  :  变量超限阈值
+    window1  :  超限阈值后左右窗口长度, 单位为 min
+    window2 : 合并窗口长度 单位为 min, 即若判别两个区间距离小于 window2, 则合并为一个窗口  
+    left_offset :  左侧窗口向左偏移量 单位为min , 默认为 0
+    right_offset :  右侧窗口向右偏移量 单位为min , 默认为 0
+    name :  存储查看修正后 效果html, 默认不存储
+    '''  
+    data2 = df.sort_index()
+    t = data2[data2[column]>th]
+    t['diff']= ((pd.Series(t.index).diff().dt.total_seconds()).values/60)
+    t['diff']= t['diff'].fillna(100)
+    ## 生成 正样本标签 区间 
+    res1 = pd.DataFrame()
+    res1['start']= t[t['diff']>1.1].index
+    t2 = t.index.get_indexer(t[t['diff']>1.1].iloc[1:].index)-1
+    res1['end']=t.iloc[t2].index.tolist()+[t.index[-1]]
+    res1['start'] = res1['start']- pd.to_timedelta(window1+1+left_offset,unit ='m')
+    res1['end'] = res1['end']+ pd.to_timedelta(window1-1+right_offset,unit ='m')
+    res1["temp"] = [np.nan]+((res1.start.iloc[1:]-res1.end.iloc[:-1].values).dt.total_seconds()/60.0).tolist()
+    res1["temp"] = res1["temp"].fillna(100)
+    bins = res1[res1['temp']>window2].index
+    res1['temp1'] = pd.cut(res1.index,bins,right=False)
+    res2 = res1.groupby("temp1").agg({"start":"min","end":"max"})
+    res2['time'] = res2['end']-res2['start']
+    res2.index = range(len(res2))
+    
+    for i in res2.index:
+        t3 = data2[(data2.index>=res2.loc[i,'start'])&(data2.index<=res2.loc[i,'end'])]
+        data2.loc[t3.index,"label"] = 1
+    data2['label'] = data2['label'].fillna(0)
+    if name:
+        me.Plot_LineBar(data2, name = name, overwrite=True)
+        print ("save image as %s"%name)
+    return data2
 
 
 if __name__ == "__main__":

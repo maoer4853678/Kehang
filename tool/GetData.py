@@ -96,13 +96,21 @@ def GetNodes_data(node_ids = [],start = None,end = None,periods = None,freq=None
         data = data.resample(freq).mean().fillna(method = "ffill")
     return data
 
+def ReadRawData(node_id = '',factory = "中碳能源",month = "2019_06",column = ['value']):
+    rawdir= '/'.join(['/home/khpython/Root/data/raw',factory,month])
+    path = os.path.join(rawdir,"%s.pk"%node_id)
+    df = pd.read_pickle(path)
+    if not len(column):
+        column = df.columns
+    return df[column]
+
 def GenerateAvgTemp(nodes_id = ["TE_1003a", "TE_1003b", "TE_1003c"],column = "value",factory='中碳能源',\
                     month="2019_06",filename = None):
     dfs= []
     for node_id in nodes_id:
-        rawdir= '/'.join(['/home/khpython/Root/data/raw',factory,month])
-        path = os.path.join(rawdir,"%s.pk"%node_id)
-        dfs.append(pd.read_pickle(path)[column])
+        df = ReadRawData(node_id = node_id,factory = factory,month = month,column = [column])
+        if len(df):
+            dfs.append(df)
     df = pd.concat(dfs,axis=1)
     df.columns = nodes_id
     df = df.fillna(method ="ffill")
